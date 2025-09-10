@@ -1,5 +1,6 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using ClientPlugin.GUI;
@@ -14,7 +15,6 @@ using VRage.Plugins;
 
 namespace ClientPlugin
 {
-    // ReSharper disable once UnusedType.Global
     public class Plugin : IPlugin, ICommonPlugin
     {
         public const string Name = "CosmicWineFixes";
@@ -66,7 +66,6 @@ namespace ClientPlugin
                 stopThread = true;
                 staThread.Join();
                 Log.Debug("Stopped STAThread");
-                // IMPORTANT: Do NOT call harmony.UnpatchAll() here! It may break other plugins.
             }
             catch (Exception ex)
             {
@@ -148,10 +147,121 @@ namespace ClientPlugin
             threadActionQueue.Enqueue(action);
         }
 
-        // ReSharper disable once UnusedMember.Global
         public void OpenConfigDialog()
         {
             MyGuiSandbox.AddScreen(new MyPluginConfigDialog());
+        }
+
+        // -------------------------------
+        // Clipboard compatibility helpers
+        // -------------------------------
+        public static void SetClipboardText(string text)
+        {
+            if (IsWayland())
+            {
+                WaylandClipboard.SetClipboardText(text);
+            }
+            else
+            {
+                ExecuteOnStaThreadSafe(() =>
+                {
+                    try
+                    {
+                        System.Windows.Forms.Clipboard.SetText(text);
+                    }
+                    catch (Exception ex)
+                    {
+                        Instance?.Log?.Critical(ex, "Failed to set clipboard (X11/XWayland)");
+                    }
+                });
+            }
+        }
+
+        public static string GetClipboardText()
+        {
+            if (IsWayland())
+            {
+                return WaylandClipboard.GetClipboardText();
+            }
+
+            string result = string.Empty;
+            ExecuteOnStaThreadSafe(() =>
+            {
+                try
+                {
+                    result = System.Windows.Forms.Clipboard.GetText();
+                }
+                catch (Exception ex)
+                {
+                    Instance?.Log?.Critical(ex, "Failed to get clipboard (X11/XWayland)");
+                }
+            });
+            return result;
+        }
+
+        private static bool IsWayland()
+        {
+            return Environment.GetEnvironmentVariable("XDG_SESSION_TYPE")?.ToLower() == "wayland";
+        }
+
+        private static void ExecuteOnStaThreadSafe(Action action)
+        {
+            if (Instance == null)
+                return;
+
+            Instance.ExecuteActionOnStaThread(action);
+        }
+    }
+
+    internal static class WaylandClipboard
+    {
+        public static void SetClipboardText(string text)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "wl-copy",
+                    RedirectStandardInput = true,
+                    UseShellExecute = false
+                };
+                using var proc = Process.Start(psi);
+                if (proc != null)
+                {
+                    proc.StandardInput.Write(text);
+                    proc.StandardInput.Close();
+                    proc.WaitForExit();
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Instance?.Log?.Critical(ex, "Failed to set clipboard (wl-copy)");
+            }
+        }
+
+        public static string GetClipboardText()
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "wl-paste",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false
+                };
+                using var proc = Process.Start(psi);
+                if (proc != null)
+                {
+                    string output = proc.StandardOutput.ReadToEnd();
+                    proc.WaitForExit();
+                    return output;
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Instance?.Log?.Critical(ex, "Failed to get clipboard (wl-paste)");
+            }
+            return string.Empty;
         }
     }
 }
