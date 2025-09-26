@@ -157,71 +157,74 @@ namespace ClientPlugin
         // -------------------------------
         public static void SetClipboardText(string text)
         {
-            if (IsWayland())
+            bool success = false;
+
+            // Try WinForms Clipboard first (works on Windows and Proton X11/XWayland)
+            ExecuteOnStaThreadSafe(() =>
             {
-                WaylandClipboard.SetClipboardText(text);
-            }
-            else
-            {
-                ExecuteOnStaThreadSafe(() =>
+                try
                 {
-                    try
-                    {
-                        System.Windows.Forms.Clipboard.SetText(text);
-                    }
-                    catch (Exception ex)
-                    {
-                        Instance?.Log?.Critical(ex, "Failed to set clipboard (X11/XWayland)");
-                    }
-                });
+                    System.Windows.Forms.Clipboard.SetText(text);
+                    success = true;
+                }
+                catch
+                {
+                    // ignore, fallback below
+                }
+            });
+
+            // Fallback: try Proton GE's clip.exe if available
+            if (!success && TryClipExe(text))
+                success = true;
+
+            if (!success)
+            {
+                Instance?.Log?.Critical(
+                    "Clipboard not supported under Proton Wayland. " +
+                    "Use Proton with X11/XWayland or a Proton build that bundles clip.exe, or get the clip.exe from somewhere"
+                );
             }
         }
 
         public static string GetClipboardText()
         {
-            if (IsWayland())
-            {
-                return WaylandClipboard.GetClipboardText();
-            }
-
             string result = string.Empty;
+            bool success = false;
+
+            // Try WinForms Clipboard
             ExecuteOnStaThreadSafe(() =>
             {
                 try
                 {
                     result = System.Windows.Forms.Clipboard.GetText();
+                    success = !string.IsNullOrEmpty(result);
                 }
-                catch (Exception ex)
+                catch
                 {
-                    Instance?.Log?.Critical(ex, "Failed to get clipboard (X11/XWayland)");
+                    // ignore, fallback below
                 }
             });
+
+            // No known way to read clipboard with clip.exe (it only writes).
+            // So if WinForms fails, we just log an error.
+            if (!success)
+            {
+                Instance?.Log?.Critical(
+                    "Clipboard read not supported under Proton Wayland. " +
+                    "Use Proton with X11/XWayland."
+                );
+            }
+
             return result;
         }
 
-        private static bool IsWayland()
-        {
-            return Environment.GetEnvironmentVariable("XDG_SESSION_TYPE")?.ToLower() == "wayland";
-        }
-
-        private static void ExecuteOnStaThreadSafe(Action action)
-        {
-            if (Instance == null)
-                return;
-
-            Instance.ExecuteActionOnStaThread(action);
-        }
-    }
-
-    internal static class WaylandClipboard
-    {
-        public static void SetClipboardText(string text)
+        private static bool TryClipExe(string text)
         {
             try
             {
                 var psi = new ProcessStartInfo
                 {
-                    FileName = "wl-copy",
+                    FileName = "clip.exe",
                     RedirectStandardInput = true,
                     UseShellExecute = false
                 };
@@ -231,37 +234,22 @@ namespace ClientPlugin
                     proc.StandardInput.Write(text);
                     proc.StandardInput.Close();
                     proc.WaitForExit();
+                    return true;
                 }
             }
-            catch (Exception ex)
+            catch
             {
-                Plugin.Instance?.Log?.Critical(ex, "Failed to set clipboard (wl-copy)");
+                // clip.exe not available
             }
+            return false;
         }
 
-        public static string GetClipboardText()
+        private static void ExecuteOnStaThreadSafe(Action action)
         {
-            try
-            {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "wl-paste",
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false
-                };
-                using var proc = Process.Start(psi);
-                if (proc != null)
-                {
-                    string output = proc.StandardOutput.ReadToEnd();
-                    proc.WaitForExit();
-                    return output;
-                }
-            }
-            catch (Exception ex)
-            {
-                Plugin.Instance?.Log?.Critical(ex, "Failed to get clipboard (wl-paste)");
-            }
-            return string.Empty;
+            if (Instance == null)
+                return;
+
+            Instance.ExecuteActionOnStaThread(action);
         }
     }
 }
